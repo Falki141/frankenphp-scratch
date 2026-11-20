@@ -1,0 +1,11 @@
+{
+	frankenphp
+}
+
+# Für HTTPS mit automatischem Zertifikat ":80" durch deine Domain ersetzen,
+# z. B. "example.com"
+:8080 {
+	root * /app/public
+	encode zstd br gzip
+	php_server
+}

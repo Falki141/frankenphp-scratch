@@ -1,0 +1,54 @@
+services:
+  mariadb:
+    image: mariadb:${MARIADB_VERSION:-11.8}
+    environment:
+      MARIADB_DATABASE: laravel
+      MARIADB_USER: laravel
+      MARIADB_PASSWORD: secret
+      MARIADB_ROOT_PASSWORD: rootsecret
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  redis:
+    image: redis:${REDIS_VERSION:-8-alpine}
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  app:
+    build:
+      context: .
+      args:
+        BASE_IMAGE: ${BASE_IMAGE:-frankenphp:test}
+        BUILDER_IMAGE: ${BUILDER_IMAGE:-frankenphp:test-ubuntu}
+    image: frankenphp-laravel-test:${VARIANT:-scratch}
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "${TEST_PORT:-18080}:8080"
+    environment:
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: http://localhost:${TEST_PORT:-18080}
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: debug
+      DB_CONNECTION: mariadb
+      DB_HOST: mariadb
+      DB_PORT: "3306"
+      DB_DATABASE: laravel
+      DB_USERNAME: laravel
+      DB_PASSWORD: secret
+      REDIS_CLIENT: phpredis
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CACHE_STORE: redis
+      SESSION_DRIVER: redis
+      QUEUE_CONNECTION: redis
