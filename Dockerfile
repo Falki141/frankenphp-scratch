@@ -4,10 +4,12 @@
 # with (almost) all bundled extensions + common PECL extensions.
 #
 # Stages:
-#   1. builder  – compiles PHP, PECL extensions, Watcher C and FrankenPHP
-#   2. ubuntu   – classic Ubuntu runtime image (with shell and apt)
-#   3. rootfs   – builds a minimal root filesystem with Ubuntu Chisel
-#   4. (final)  – scratch image containing only that root filesystem
+#   watcher  – compiles Watcher C           (runs in parallel with builder)
+#   gotools  – Go toolchain, xcaddy, chisel (runs in parallel with builder)
+#   builder  – compiles PHP + PIE extensions, then FrankenPHP
+#   ubuntu   – classic Ubuntu runtime image (with shell and apt)
+#   rootfs   – builds a minimal root filesystem with Ubuntu Chisel
+#   (final)  – scratch image containing only that root filesystem
 #
 # Build (scratch, default):   docker build -t frankenphp .
 # Build (Ubuntu variant):     docker build --target ubuntu -t frankenphp:ubuntu .
@@ -16,16 +18,47 @@
 # Run (ubuntu):   docker run -p 80:80 -p 443:443 -v "$PWD":/app frankenphp:ubuntu
 
 ARG UBUNTU_VERSION=26.04
+# Go version: GOTOOLCHAIN=auto automatically downloads a newer toolchain
+# if FrankenPHP or Chisel requires a higher version.
+ARG GO_VERSION=1.27.4
 
 ###############################################################################
-# Stage 1: Builder
+# Stage: Watcher C (optional, restarts workers on file changes)
+# Independent of PHP, so BuildKit builds it in parallel with the builder.
+###############################################################################
+FROM ubuntu:${UBUNTU_VERSION} AS watcher
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Installed with DESTDIR so the result (prefix /usr/local) can be copied
+# into the builder as a whole.
+RUN git clone --depth 1 https://github.com/e-dant/watcher.git /usr/local/src/watcher \
+    && cd /usr/local/src/watcher \
+    && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_BIN=OFF \
+    && cmake --build build -j"$(nproc)" \
+    && DESTDIR=/out cmake --install build
+
+###############################################################################
+# Stage: Go toolchain + xcaddy + chisel
+# Also independent of PHP and built in parallel with the builder.
+###############################################################################
+FROM golang:${GO_VERSION} AS gotools
+
+# Static binaries (no dependency on the Debian glibc of the golang image)
+ENV GOTOOLCHAIN=auto \
+    CGO_ENABLED=0
+RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest \
+    && go install github.com/canonical/chisel/cmd/chisel@latest
+
+###############################################################################
+# Stage: Builder
 ###############################################################################
 FROM ubuntu:${UBUNTU_VERSION} AS builder
 
 ARG PHP_VERSION=8.5.13
-# Go version: GOTOOLCHAIN=auto automatically downloads a newer toolchain
-# if FrankenPHP or Chisel requires a higher version.
-ARG GO_VERSION=1.27.4
 # Extensions installed with PIE (Composer package name, optionally with a
 # version constraint, e.g. "phpredis/phpredis:^6.2").
 # List of all PIE-compatible extensions: https://packagist.org/extensions
@@ -119,21 +152,13 @@ RUN --mount=type=bind,from=ghcr.io/php/pie:bin,source=/pie,target=/usr/local/bin
     pie show; \
     php -m
 
-# --- Watcher C (optional, restarts workers on file changes) ------------------
-RUN git clone --depth 1 https://github.com/e-dant/watcher.git /usr/local/src/watcher \
-    && cd /usr/local/src/watcher \
-    && cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_BIN=OFF \
-    && cmake --build build -j"$(nproc)" \
-    && cmake --install build \
-    && ldconfig
-
-# --- Go + xcaddy -------------------------------------------------------------
-RUN ARCH="$(dpkg --print-architecture)" \
-    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
-        | tar xz -C /usr/local
+# --- Watcher C and Go toolchain from the parallel stages ---------------------
+COPY --from=watcher /out/usr/local/ /usr/local/
+RUN ldconfig
+COPY --from=gotools /usr/local/go/ /usr/local/go/
+COPY --from=gotools /go/bin/xcaddy /root/go/bin/xcaddy
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}" \
     GOTOOLCHAIN=auto
-RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
 
 # --- Build FrankenPHP --------------------------------------------------------
 WORKDIR /build
@@ -168,7 +193,7 @@ RUN set -eu; \
     echo "Required runtime packages:"; cat /runtime-packages.txt
 
 ###############################################################################
-# Stage 2: Ubuntu runtime (with shell and apt, e.g. for debugging)
+# Stage: Ubuntu runtime (with shell and apt, e.g. for debugging)
 ###############################################################################
 FROM ubuntu:${UBUNTU_VERSION} AS ubuntu
 
@@ -210,7 +235,7 @@ EXPOSE 80 443 443/udp
 CMD ["frankenphp", "run", "--config", "/etc/frankenphp/Caddyfile"]
 
 ###############################################################################
-# Stage 3: Minimal root filesystem with Ubuntu Chisel
+# Stage: Minimal root filesystem with Ubuntu Chisel
 ###############################################################################
 FROM builder AS rootfs
 
@@ -220,8 +245,8 @@ ARG CHISEL_RELEASE=ubuntu-${UBUNTU_VERSION}
 # time zones, glibc). Slices that do not exist are skipped.
 ARG BASE_SLICES="base-files_base base-files_release-info ca-certificates_data media-types_data tzdata_zoneinfo libc6_libs libc6_config"
 
-# Build Chisel with the Go toolchain already present
-RUN go install github.com/canonical/chisel/cmd/chisel@latest
+# Chisel comes prebuilt from the gotools stage
+COPY --from=gotools /go/bin/chisel /root/go/bin/chisel
 
 # 1) Cut slices: for each runtime package the "<package>_libs" slice is used.
 #    If no slice exists (yet), the package's .so files are copied directly
@@ -279,7 +304,7 @@ RUN set -eux; \
     #chroot /rootfs /usr/local/bin/frankenphp php-cli -m
 
 ###############################################################################
-# Stage 4: scratch image (default target)
+# Stage: scratch image (default target)
 ###############################################################################
 FROM scratch
 
