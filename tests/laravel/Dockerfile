@@ -23,4 +23,4 @@ RUN composer create-project --no-interaction --prefer-dist --no-dev \
 COPY overlay/ /src/app/
 
 FROM ${BASE_IMAGE}
-COPY --from=app --chown=65532:65532 /src/app /app
+COPY --from=app --chown=33:33 /src/app /app

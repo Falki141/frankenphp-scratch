@@ -251,7 +251,11 @@ COPY --from=gotools /go/bin/chisel /root/go/bin/chisel
 # 1) Cut slices: for each runtime package the "<package>_libs" slice is used.
 #    If no slice exists (yet), the package's .so files are copied directly
 #    from the builder.
-RUN set -eu; \
+#    The Chisel download cache is kept in a cache mount, and "chisel cut" is
+#    retried because archive.ubuntu.com occasionally drops connections
+#    ("cannot fetch from archive: unexpected EOF").
+RUN --mount=type=cache,target=/root/.cache/chisel \
+    set -eu; \
     mkdir -p /rootfs; \
     slices=""; noslice=""; \
     for s in ${BASE_SLICES}; do \
@@ -269,7 +273,14 @@ RUN set -eu; \
         fi; \
     done; \
     echo "Chisel slices:$slices"; \
-    chisel cut --release "${CHISEL_RELEASE}" --root /rootfs $slices; \
+    attempt=1; \
+    until chisel cut --release "${CHISEL_RELEASE}" --root /rootfs $slices; do \
+        if [ "$attempt" -ge 5 ]; then echo "chisel cut failed after $attempt attempts" >&2; exit 1; fi; \
+        echo "chisel cut failed (attempt $attempt), retrying in $((attempt * 10))s ..." >&2; \
+        sleep $((attempt * 10)); \
+        attempt=$((attempt + 1)); \
+        rm -rf /rootfs; mkdir -p /rootfs; \
+    done; \
     for pkg in $noslice; do \
         echo "No slice for $pkg – copying libraries from the builder"; \
         dpkg -L "$pkg" | grep -E '\.so(\.[0-9]+)*$' | while read -r f; do \
@@ -290,16 +301,17 @@ RUN set -eux; \
     [ -f /rootfs/etc/ld.so.conf ] || echo 'include /etc/ld.so.conf.d/*.conf' > /rootfs/etc/ld.so.conf; \
     printf '/usr/local/lib\n/usr/lib/%s\n' "$MULTIARCH" > /rootfs/etc/ld.so.conf.d/frankenphp.conf; \
     ldconfig -r /rootfs; \
-    # Unprivileged user (UID/GID 65532, as in distroless)
+    # Unprivileged user: Ubuntu's www-data (UID/GID 33, home /var/www),
+    # taken verbatim from the builder's /etc/passwd and /etc/group
     echo 'root:x:0:0:root:/root:/usr/sbin/nologin' >  /rootfs/etc/passwd; \
-    echo 'nonroot:x:65532:65532:nonroot:/home/nonroot:/usr/sbin/nologin' >> /rootfs/etc/passwd; \
+    grep '^www-data:' /etc/passwd >> /rootfs/etc/passwd; \
     echo 'root:x:0:' > /rootfs/etc/group; \
-    echo 'nonroot:x:65532:' >> /rootfs/etc/group; \
+    grep '^www-data:' /etc/group >> /rootfs/etc/group; \
     # Directories for the app, Caddy data/config and PHP temp files
-    mkdir -p /rootfs/tmp /rootfs/app/public /rootfs/config /rootfs/data /rootfs/home/nonroot; \
+    mkdir -p /rootfs/tmp /rootfs/app/public /rootfs/config /rootfs/data /rootfs/var/www; \
     chmod 1777 /rootfs/tmp; \
     echo '<?php phpinfo();' > /rootfs/app/public/index.php; \
-    chown -R 65532:65532 /rootfs/app /rootfs/config /rootfs/data /rootfs/home/nonroot;
+    chown -R www-data:www-data /rootfs/app /rootfs/config /rootfs/data /rootfs/var/www;
     # Test: does FrankenPHP run in the minimal root filesystem and load all extensions?
     #chroot /rootfs /usr/local/bin/frankenphp php-cli -m
 
@@ -316,7 +328,8 @@ ENV PATH=/usr/local/bin \
     # Ports < 1024 are not allowed for non-root users
     SERVER_NAME=:8080
 
-USER 65532:65532
+# www-data (UID/GID 33)
+USER 33:33
 WORKDIR /app
 EXPOSE 8080
 
