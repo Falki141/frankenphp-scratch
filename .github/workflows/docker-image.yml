@@ -6,24 +6,64 @@ on:
   push:
     branches:
       - "main"
+  workflow_dispatch:
+    inputs:
+      php_versions:
+        description: 'PHP versions to build, space-separated (e.g. "8.5.13 8.6.0"). Empty = default list.'
+        required: false
+        default: ""
 
 env:
   IMAGE: falki141/frankenphp-ubuntu
-  TAG: "8.5"
+  # PHP versions that are built on every run (exact x.y.z from php.net).
+  # Each version gets the tags "x.y.z" and "x.y"; the highest one also gets
+  # "latest". To update PHP, just bump the numbers here.
+  PHP_VERSIONS: "8.5.13 8.6.0"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # Each platform is built natively on its own runner (no QEMU emulation)
-  # and pushed by digest only. The merge job then combines the digests
-  # into a single multi-arch tag.
+  # Turns the version list into a JSON array for the build matrix.
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
+      latest: ${{ steps.versions.outputs.latest }}
+    steps:
+      - id: versions
+        env:
+          INPUT_VERSIONS: ${{ inputs.php_versions }}
+        run: |
+          versions="${INPUT_VERSIONS:-$PHP_VERSIONS}"
+          for v in $versions; do
+            if ! [[ "$v" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::Invalid PHP version '$v' (expected x.y.z)"
+              exit 1
+            fi
+          done
+          echo "versions=$(printf '%s\n' $versions | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+          # "latest" always refers to the highest version of the default list
+          echo "latest=$(printf '%s\n' $PHP_VERSIONS | sort -V | tail -n1)" >> "$GITHUB_OUTPUT"
+          echo "Building PHP versions: $versions"
+
+  # Each PHP version × platform is built natively on its own runner (no QEMU
+  # emulation) and pushed by digest only. The merge job then combines the
+  # digests of each PHP version into multi-arch tags.
   build:
+    needs: setup
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
+        php: ${{ fromJSON(needs.setup.outputs.versions) }}
+        platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
             runner: ubuntu-latest
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
+    name: build (PHP ${{ matrix.php }}, ${{ matrix.platform }})
     runs-on: ${{ matrix.runner }}
     steps:
       - name: Prepare
@@ -49,6 +89,8 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: |
+            PHP_VERSION=${{ matrix.php }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
@@ -60,21 +102,56 @@ jobs:
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ env.PLATFORM_PAIR }}
+          name: digests-${{ matrix.php }}-${{ env.PLATFORM_PAIR }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
 
+  # One merge per PHP version. Runs even if another PHP version failed, but
+  # only tags a version when both of its platforms were built successfully.
   merge:
+    needs: [setup, build]
+    if: ${{ !cancelled() && needs.setup.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ${{ fromJSON(needs.setup.outputs.versions) }}
+    name: merge (PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
-    needs: build
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-*
+          pattern: digests-${{ matrix.php }}-*
           merge-multiple: true
+
+      - name: Check that all platforms were built
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          count="$(ls -1 | wc -l)"
+          if [ "$count" -ne 2 ]; then
+            echo "::error::PHP ${{ matrix.php }}: expected 2 platform digests, found $count"
+            exit 1
+          fi
+
+      - name: Determine tags
+        id: tags
+        env:
+          PHP: ${{ matrix.php }}
+          LATEST: ${{ needs.setup.outputs.latest }}
+        run: |
+          tags="-t ${IMAGE}:${PHP}"
+          # Moving tags (x.y, latest) only for versions from the default list,
+          # so a manual build of an older patch release does not overwrite them.
+          if printf '%s\n' $PHP_VERSIONS | grep -qx "$PHP"; then
+            tags="$tags -t ${IMAGE}:${PHP%.*}"
+            if [ "$PHP" = "$LATEST" ]; then
+              tags="$tags -t ${IMAGE}:latest"
+            fi
+          fi
+          echo "args=$tags" >> "$GITHUB_OUTPUT"
+          echo "Tags: $tags"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -88,8 +165,8 @@ jobs:
       - name: Create multi-arch manifest
         working-directory: ${{ runner.temp }}/digests
         run: |
-          docker buildx imagetools create -t "${IMAGE}:${TAG}" \
+          docker buildx imagetools create ${{ steps.tags.outputs.args }} \
             $(printf "${IMAGE}@sha256:%s " *)
 
       - name: Inspect image
-        run: docker buildx imagetools inspect "${IMAGE}:${TAG}"
+        run: docker buildx imagetools inspect "${IMAGE}:${{ matrix.php }}"

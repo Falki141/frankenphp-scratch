@@ -13,11 +13,15 @@
 #
 # Build (scratch, default):   docker build -t frankenphp .
 # Build (Ubuntu variant):     docker build --target ubuntu -t frankenphp:ubuntu .
+# Other PHP version:          docker build --build-arg PHP_VERSION=8.6.0 -t frankenphp:8.6 .
 #
 # Run (scratch):  docker run -p 8080:8080 -v "$PWD":/app frankenphp
-# Run (ubuntu):   docker run -p 80:80 -p 443:443 -v "$PWD":/app frankenphp:ubuntu
+# Run (ubuntu):   docker run -p 8080:8080 -v "$PWD":/app frankenphp:ubuntu
 
 ARG UBUNTU_VERSION=26.04
+# Exact PHP version (x.y.z) as published on php.net/distributions.
+# Override with --build-arg PHP_VERSION=8.6.0
+ARG PHP_VERSION=8.5.13
 # Go version: GOTOOLCHAIN=auto automatically downloads a newer toolchain
 # if FrankenPHP or Chisel requires a higher version.
 ARG GO_VERSION=1.27.4
@@ -58,7 +62,7 @@ RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest \
 ###############################################################################
 FROM ubuntu:${UBUNTU_VERSION} AS builder
 
-ARG PHP_VERSION=8.5.13
+ARG PHP_VERSION
 # Extensions installed with PIE (Composer package name, optionally with a
 # version constraint, e.g. "phpredis/phpredis:^6.2").
 # List of all PIE-compatible extensions: https://packagist.org/extensions
@@ -197,6 +201,11 @@ RUN set -eu; \
 ###############################################################################
 FROM ubuntu:${UBUNTU_VERSION} AS ubuntu
 
+ARG PHP_VERSION
+LABEL org.opencontainers.image.title="frankenphp-ubuntu" \
+      org.opencontainers.image.description="FrankenPHP with PHP ${PHP_VERSION} (ZTS) on Ubuntu" \
+      org.opencontainers.image.version="${PHP_VERSION}"
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 COPY --from=builder /runtime-packages.txt /tmp/runtime-packages.txt
@@ -319,6 +328,11 @@ RUN set -eux; \
 # Stage: scratch image (default target)
 ###############################################################################
 FROM scratch
+
+ARG PHP_VERSION
+LABEL org.opencontainers.image.title="frankenphp-ubuntu" \
+      org.opencontainers.image.description="FrankenPHP with PHP ${PHP_VERSION} (ZTS) on Ubuntu" \
+      org.opencontainers.image.version="${PHP_VERSION}"
 
 COPY --from=rootfs /rootfs/ /
 
