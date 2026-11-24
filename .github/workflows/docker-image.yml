@@ -14,7 +14,7 @@ on:
         default: ""
 
 env:
-  IMAGE: falki141/frankenphp-ubuntu
+  IMAGE: falki141/frankenphp-scratch
   # PHP versions that are built on every run (exact x.y.z from php.net).
   # Each version gets the tags "x.y.z" and "x.y"; the highest one also gets
   # "latest". To update PHP, just bump the numbers here.
