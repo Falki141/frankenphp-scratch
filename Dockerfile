@@ -69,7 +69,7 @@ ARG PHP_VERSION
 # imagick is deliberately not included: ImageMagick needs coder modules and
 # configuration files at runtime that the Chisel slices do not provide. For the
 # Ubuntu variant you can add "imagick/imagick" and install libmagickwand-dev.
-ARG PIE_EXTENSIONS="apcu/apcu phpredis/phpredis"
+ARG PIE_EXTENSIONS="phpredis/phpredis"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
