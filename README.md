@@ -57,6 +57,28 @@ uses your domain instead of `:8080`. The scratch image runs as `www-data` and
 can only listen on ports ≥ 1024. For ports 80/443, use the ubuntu variant or
 terminate TLS in front of the container.
 
+### Health check
+
+Both variants define a Docker `HEALTHCHECK`. By default, it queries Caddy's
+admin endpoint (`http://localhost:2019/metrics`). This shows that the server is
+running, regardless of your site address, but it does not execute any PHP.
+
+Set `HEALTHCHECK_URL` to check your application instead, for example Laravel's
+health route:
+
+```sh
+docker run -p 8080:8080 -e HEALTHCHECK_URL=http://localhost:8080/up \
+    -v "$PWD":/app falki141/frankenphp-ubuntu:8.5
+```
+
+- Status codes 2xx and 3xx are healthy. Redirects are not followed.
+- If your Caddyfile contains `admin off` or moves the admin endpoint, you have
+  to set `HEALTHCHECK_URL`.
+- Containers that do not run the server (such as queue workers started with
+  `php-cli`) should disable the check: `docker run --no-healthcheck …`, or
+  `healthcheck: { disable: true }` in Compose.
+- Kubernetes ignores `HEALTHCHECK`. Use an `httpGet` probe on port 8080 there.
+
 ### Running PHP CLI commands
 
 The scratch image has no `php` binary. FrankenPHP's embedded CLI is used instead:

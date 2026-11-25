@@ -57,6 +57,10 @@ ENV GOTOOLCHAIN=auto \
 RUN go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest \
     && go install github.com/canonical/chisel/cmd/chisel@latest
 
+# Static health probe for both runtime images (scratch has no shell or curl)
+COPY healthcheck/main.go /src/healthcheck/main.go
+RUN go build -trimpath -ldflags='-s -w' -o /go/bin/healthcheck /src/healthcheck/main.go
+
 ###############################################################################
 # Stage: Builder
 ###############################################################################
@@ -220,6 +224,7 @@ COPY --from=builder /usr/local/bin/ /usr/local/bin/
 COPY --from=builder /usr/local/lib/ /usr/local/lib/
 COPY --from=builder /usr/local/etc/php/ /usr/local/etc/php/
 COPY --from=builder /usr/local/include/ /usr/local/include/
+COPY --from=gotools /go/bin/healthcheck /usr/local/bin/healthcheck
 RUN ldconfig
 
 # Verify: no missing libraries, extensions load
@@ -240,6 +245,11 @@ COPY Caddyfile /etc/frankenphp/Caddyfile
 
 WORKDIR /app
 EXPOSE 80 443 443/udp
+
+# Queries Caddy's admin endpoint by default. Set HEALTHCHECK_URL to check the
+# application instead, e.g. http://localhost:8080/up
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=2s --retries=3 \
+    CMD ["/usr/local/bin/healthcheck"]
 
 CMD ["frankenphp", "run", "--config", "/etc/frankenphp/Caddyfile"]
 
@@ -335,6 +345,7 @@ LABEL org.opencontainers.image.title="frankenphp-ubuntu" \
       org.opencontainers.image.version="${PHP_VERSION}"
 
 COPY --from=rootfs /rootfs/ /
+COPY --from=gotools /go/bin/healthcheck /usr/local/bin/healthcheck
 
 ENV PATH=/usr/local/bin \
     XDG_CONFIG_HOME=/config \
@@ -346,6 +357,11 @@ ENV PATH=/usr/local/bin \
 USER 33:33
 WORKDIR /app
 EXPOSE 8080
+
+# Queries Caddy's admin endpoint by default. Set HEALTHCHECK_URL to check the
+# application instead, e.g. http://localhost:8080/up
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --start-interval=2s --retries=3 \
+    CMD ["/usr/local/bin/healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/frankenphp"]
 CMD ["run", "--config", "/etc/frankenphp/Caddyfile"]
